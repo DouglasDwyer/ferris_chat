@@ -167,7 +167,7 @@ impl PeerAddressSet {
         let id = RandomState::new().build_hasher().finish();
 
         for i in 0..Self::MAX_RETRIES {            
-            let random_index = id as usize % Self::STUN_SERVERS.len();
+            let random_index = RandomState::new().build_hasher().finish() as usize % Self::STUN_SERVERS.len();
             let address = Self::STUN_SERVERS[random_index];
 
             let mut data = [
