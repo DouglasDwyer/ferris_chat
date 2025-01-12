@@ -117,9 +117,6 @@ impl PeerAddressSet {
         use std::hash::*;
         use std::net::*;
 
-        let socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)).expect("Failed to bind socket.");
-        socket.set_read_timeout(Some(std::time::Duration::from_secs(2)));
-
         let mut ip_addresses = Vec::new();
         let mut port = None;
         let mut symmetric_nat = false;
@@ -135,22 +132,44 @@ impl PeerAddressSet {
 				random_index as u8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // transaction ID
             ];
 
-            socket.send_to(&data, address);
+            let Ok(mut addresses) = address.to_socket_addrs().map_err(err_to_string) else { continue; };
+            let Some(first) = addresses.filter_map(|x| match x {
+                SocketAddr::V4(socket_addr_v4) => Some(socket_addr_v4),
+                SocketAddr::V6(socket_addr_v6) => None,
+            }).next() else { continue; };
 
+            let mut enet_addr = ENetAddress { host: u32::to_be(first.ip().to_bits()), port: first.port() };
+            let send_res = enet_socket_send((*host).socket, &enet_addr, &ENetBuffer { data: data.as_mut_ptr().cast(), dataLength: data.len() }, 1);
+            assert!(send_res as usize == data.len());
+            
             let mut received = [0; 1024];
-            if let Ok((read_len, _)) = socket.recv_from(&mut received) {
-                if let Ok(addrs) = Self::parse_address(&received[..read_len], &data[8..20]) {
-                    for addr in &addrs {
-                        if !ip_addresses.contains(addr.ip()) {
-                            ip_addresses.push(*addr.ip());
-                        }
-                        if let Some(prev_port) = port {
-                            if prev_port != addr.port() {
-                                symmetric_nat = true;
+            loop {
+                let mut input = _ENetSocketWait_ENET_SOCKET_WAIT_RECEIVE as u32;
+                let wait_a_minute = enet_socket_wait((*host).socket, &mut input, 2000);
+
+                let read_len = enet_socket_receive((*host).socket, &mut enet_addr, &mut ENetBuffer { data: received.as_mut_ptr().cast(), dataLength: received.len() }, 1);
+
+                if 0 < read_len {
+                    if let Ok(addrs) = Self::parse_address(&received[..read_len as usize], &data[8..20]) {
+                        for addr in &addrs {
+                            if !ip_addresses.contains(addr.ip()) {
+                                ip_addresses.push(*addr.ip());
                             }
+                            if let Some(prev_port) = port {
+                                if prev_port != addr.port() {
+                                    symmetric_nat = true;
+                                }
+                            }
+                            port = Some(addr.port());
                         }
-                        port = Some(addr.port());
+                        break;
                     }
+                }
+                else if read_len < 0 {
+                    panic!("TIMEOUT BRUH {read_len:?}");
+                }
+                else {
+                    break;
                 }
             }
         }
