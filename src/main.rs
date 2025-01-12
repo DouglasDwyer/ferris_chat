@@ -330,7 +330,7 @@ unsafe fn hole_punch(host: *mut ENetHost, local: &PeerAddressSet, remote: &PeerA
             println!("Attempting NAT punchthrough against cone NAT...");
         }
 
-        let port_expansion = if remote.symmetric_nat { 100u32.div_ceil(remote.public_ips.len() as u32) // 100 ports every 10 ms, or 1000 ports pinged a second
+        let port_expansion = if remote.symmetric_nat { 8u32.div_ceil(remote.public_ips.len() as u32) // 100 ports every 10 ms, or 1000 ports pinged a second
         } else { 0 };
 
         let mut port_counter = 0;
@@ -340,25 +340,29 @@ unsafe fn hole_punch(host: *mut ENetHost, local: &PeerAddressSet, remote: &PeerA
 
         loop {
             for remote_ip in &remote.public_ips {
-                let port_incr = port_counter / 2;
+                /*let port_incr = port_counter / 2;
                 let base_port = if !remote.symmetric_nat { 0 } else if port_incr % 2 == 0 {
                     (port_incr / 2) * port_expansion as i32
                 } else {
                     -(port_incr / 2 + 1) * port_expansion as i32
-                };
+                };*/
+                let base_port = port_counter * port_expansion as i32;
 
                 if remote.symmetric_nat {
-                    println!("[SYM] CHECK {remote_ip:?} PORTS {} to {}", remote.port.wrapping_add(base_port as u16), remote.port.wrapping_add(base_port as u16).wrapping_add(port_expansion as u16 - 1));
+                    //println!("[SYM] CHECK {remote_ip:?} PORTS {} to {}", remote.port.wrapping_add(base_port as u16), remote.port.wrapping_add(base_port as u16).wrapping_add(port_expansion as u16 - 1));
                 }
                 else {
-                    println!("[CONE] CHECK {remote_ip:?} PORT {}", remote.port);
+                    //println!("[CONE] CHECK {remote_ip:?} PORT {}", remote.port);
                 }
 
                 for port_exp in 0..port_expansion {
                     let port = remote.port.wrapping_add(base_port as u16).wrapping_add(port_exp as u16);
                     let remote_address = ENetAddress { host: u32::to_be(remote_ip.to_bits()), port: remote.port };            
                     let send_res = enet_socket_send((*host).socket, &remote_address, &ENetBuffer { data: data.as_mut_ptr().cast(), dataLength: data.len() }, 1);
-                    assert!(send_res as usize == data.len());
+                    
+                    if send_res != data.len() as i32 {
+                        println!("SEND ERR {send_res:?}");
+                    }
                 }
             }
 
@@ -370,6 +374,7 @@ unsafe fn hole_punch(host: *mut ENetHost, local: &PeerAddressSet, remote: &PeerA
             let read_len = enet_socket_receive((*host).socket, &mut sender_addr, &mut ENetBuffer { data: received.as_mut_ptr().cast(), dataLength: received.len() }, 1);
 
             if 0 < read_len {
+                println!("RECEIVED SOMETINTG");
                 if let Some(punchthrough_packet) = NatPunchthroughPacket::from_bytes(&received) {
                     if punchthrough_packet.id == remote.id {
                         let ip_addr = Ipv4Addr::from_bits(u32::from_be(sender_addr.host));
