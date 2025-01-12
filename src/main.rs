@@ -1,13 +1,56 @@
+#![allow(warnings)]
+
 use enet_sys::*;
 use local_ip_address::*;
+use serde::*;
 use std::net::*;
 
-#[derive(Clone, Debug)]
+pub struct NatPunchthroughPacket {
+    pub magic_cookie: u64,
+    pub id: u64
+}
+
+impl NatPunchthroughPacket {
+    pub const MAGIC_COOKIE: u64 = 2664366037301559495;
+
+    pub fn new(local: &PeerAddressSet) -> Self {
+        Self {
+            magic_cookie: Self::MAGIC_COOKIE,
+            id: local.id
+        }
+    }
+
+    pub fn as_bytes(&self) -> [u8; size_of::<Self>()] {
+        unsafe {
+            *std::mem::transmute::<_, &[u8; size_of::<Self>()]>(self)
+        }
+    }
+
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        unsafe {
+            if size_of::<Self>() <= data.len() {
+                let packet = std::ptr::read_unaligned(data.as_ptr().cast::<Self>());
+                if packet.magic_cookie == Self::MAGIC_COOKIE {
+                    Some(packet)
+                }
+                else {
+                    None
+                }
+            }
+            else {
+                None
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PeerAddressSet {
     pub local: SocketAddrV4,
+    pub id: u64,
     pub public_ips: Vec<Ipv4Addr>,
     pub port: u16,
-    pub symmetric_nat: bool
+    pub symmetric_nat: bool,
 }
 
 impl PeerAddressSet {
@@ -121,8 +164,10 @@ impl PeerAddressSet {
         let mut port = None;
         let mut symmetric_nat = false;
 
+        let id = RandomState::new().build_hasher().finish();
+
         for i in 0..Self::MAX_RETRIES {            
-            let random_index = RandomState::new().build_hasher().finish() as usize % Self::STUN_SERVERS.len();
+            let random_index = id as usize % Self::STUN_SERVERS.len();
             let address = Self::STUN_SERVERS[random_index];
 
             let mut data = [
@@ -176,6 +221,7 @@ impl PeerAddressSet {
 
         Ok(PeerAddressSet {
             local: Self::get_local_address((*host).address.port)?,
+            id,
             public_ips: ip_addresses,
             port: port.unwrap_or(0),
             symmetric_nat
@@ -259,6 +305,127 @@ impl PeerAddressSet {
     }
 }
 
+fn under_same_nat(local: &PeerAddressSet, remote: &PeerAddressSet) -> bool {
+    for first in &local.public_ips {
+        for second in &remote.public_ips {
+            if first == second {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+/// Utilizes NAT punchthrough to establish a firewall hole between the `local` and `remote` peers.
+unsafe fn hole_punch(host: *mut ENetHost, local: &PeerAddressSet, remote: &PeerAddressSet) -> Result<SocketAddrV4, String> {
+    if under_same_nat(local, remote) {
+        return Ok(remote.local);
+    }
+    else {
+        if remote.symmetric_nat {
+            println!("Attempting NAT punchthrough against symmetric NAT...");
+        }
+        else {
+            println!("Attempting NAT punchthrough against cone NAT...");
+        }
+
+        let port_expansion = if remote.symmetric_nat { 100u32.div_ceil(remote.public_ips.len() as u32) // 100 ports every 10 ms, or 1000 ports pinged a second
+        } else { 0 };
+
+        let mut port_counter = 0;
+        
+        let packet = NatPunchthroughPacket::new(local);
+        let mut data = packet.as_bytes();
+
+        loop {
+            for remote_ip in &remote.public_ips {
+                let port_incr = port_counter / 2;
+                let base_port = if port_incr % 2 == 0 {
+                    (port_incr / 2) * port_expansion as i32
+                } else {
+                    -(port_incr / 2 + 1) * port_expansion as i32
+                };
+
+                if remote.symmetric_nat {
+                    println!("CHECK PORTS {} to {}", remote.port.wrapping_add(base_port as u16), remote.port.wrapping_add(base_port as u16).wrapping_add(port_expansion as u16 - 1));
+                }
+
+                for port_exp in 0..port_expansion {
+                    let port = remote.port.wrapping_add(base_port as u16).wrapping_add(port_exp as u16);
+                    let remote_address = ENetAddress { host: u32::to_be(remote_ip.to_bits()), port: remote.port };            
+                    let send_res = enet_socket_send((*host).socket, &remote_address, &ENetBuffer { data: data.as_mut_ptr().cast(), dataLength: data.len() }, 1);
+                    assert!(send_res as usize == data.len());
+                }
+            }
+
+            let mut received = [0; 64];
+            let mut input = _ENetSocketWait_ENET_SOCKET_WAIT_RECEIVE as u32;
+            enet_socket_wait((*host).socket, &mut input, 10);  // ms
+
+            let mut sender_addr = std::mem::zeroed();
+            let read_len = enet_socket_receive((*host).socket, &mut sender_addr, &mut ENetBuffer { data: received.as_mut_ptr().cast(), dataLength: received.len() }, 1);
+
+            if 0 < read_len {
+                if let Some(punchthrough_packet) = NatPunchthroughPacket::from_bytes(&received) {
+                    if punchthrough_packet.id == remote.id {
+                        let ip_addr = Ipv4Addr::from_bits(u32::from_be(sender_addr.host));
+                        let send_res = enet_socket_send((*host).socket, &sender_addr, &ENetBuffer { data: data.as_mut_ptr().cast(), dataLength: data.len() }, 1);
+                        return Ok(SocketAddrV4::new(ip_addr, sender_addr.port));
+                    }
+                }
+            }
+
+            port_counter += 1;
+        }
+    }
+}
+
+unsafe fn connect_run_chat(host: *mut ENetHost, remote: SocketAddrV4) {
+    use std::sync::*;
+
+    let enet_addr = ENetAddress { host: u32::to_be(remote.ip().to_bits()), port: remote.port() };
+    let peer = enet_host_connect(host, &enet_addr, 2, 0);
+    assert!(!peer.is_null());
+
+    let mut event = std::mem::zeroed::<ENetEvent>();
+    if (enet_host_service(host, &mut event, 5000) > 0) && event.type_ == _ENetEventType_ENET_EVENT_TYPE_CONNECT {
+        println!("Connected to peer at remote {remote:?}");
+        let outgoing_messages = Arc::new(Mutex::new(Vec::new()));
+        let outgoing_messages_clone = outgoing_messages.clone();
+
+        std::thread::spawn(move || {
+            loop {
+                let mut buffer = String::new();
+                std::io::stdin().read_line(&mut buffer).expect("Failed to read user input");
+                outgoing_messages_clone.lock().expect("Failed to lock outgoing messages.").push(buffer.trim_end().to_owned());
+            }
+        });
+
+        loop {
+            if (enet_host_service(host, &mut event, 100) > 0) {
+                if event.type_ == _ENetEventType_ENET_EVENT_TYPE_RECEIVE {
+                    let string = std::str::from_utf8(std::slice::from_raw_parts((*event.packet).data, (*event.packet).dataLength))
+                        .expect("Remote host sent invalid data.");
+                    println!("Remote: {string}");
+                }
+                else if event.type_ == _ENetEventType_ENET_EVENT_TYPE_DISCONNECT {
+                    println!("Remote host disconnected.");
+                    std::process::abort();
+                }
+            }
+
+            for message in outgoing_messages.lock().expect("Failed to lock outgoing messages.").drain(..) {
+                let packet = enet_packet_create(message.as_bytes().as_ptr().cast(), message.as_bytes().len(), _ENetPacketFlag_ENET_PACKET_FLAG_RELIABLE as u32);
+                enet_peer_send(peer, 0, packet);
+            }
+        }
+    }
+    else {
+        panic!("Failed to connect to remote {remote:?}");
+    }
+}
+
 fn main() {
     unsafe {
         enet_initialize();
@@ -269,7 +436,18 @@ fn main() {
             panic!("Could not create enet host");
         }
 
-        println!("{:?}", PeerAddressSet::host_address_set(server));
+        println!("Gathering host addresses...");
+        let address_set = PeerAddressSet::host_address_set(server).expect("Failed to gather addresses.");
+        let address_data = serde_json::to_string(&address_set).expect("Failed to serialize address data");
+        println!("Your address token: {address_data}");
+        println!("Copy/paste peer's address token:");
+
+        let mut peer_address_data = String::new();
+        std::io::stdin().read_line(&mut peer_address_data).expect("Failed to read user input.");
+        let peer_address_set = serde_json::from_str(&peer_address_data).expect("Failed to parse peer addresss.");
+        
+        let remote_addr = hole_punch(server, &address_set, &peer_address_set).expect("Failed to punch hole");
+        connect_run_chat(server, remote_addr);
     }
 }
 

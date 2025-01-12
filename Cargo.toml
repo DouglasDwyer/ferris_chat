@@ -6,3 +6,11 @@ edition = "2021"
 [dependencies]
 enet-sys = "1.0.4"
 local-ip-address = "=0.6.3"
+serde = { version = "1.0.217", features = [ "derive" ] }
+serde_json = "1.0.135"
+
+
+[profile.dev]
+overflow-checks=false
+[profile.release]
+overflow-checks=false
