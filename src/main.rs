@@ -323,6 +323,12 @@ unsafe fn hole_punch(host: *mut ENetHost, local: &PeerAddressSet, remote: &PeerA
         return Ok(remote.local);
     }
     else {
+        /*
+        let mut remote = remote.clone();
+        remote.symmetric_nat = false;
+        remote.public_ips = vec!(remote.local.ip().clone());
+        remote.port = remote.local.port(); */
+
         if remote.symmetric_nat {
             println!("Attempting NAT punchthrough against symmetric NAT...");
         }
@@ -331,7 +337,7 @@ unsafe fn hole_punch(host: *mut ENetHost, local: &PeerAddressSet, remote: &PeerA
         }
 
         let port_expansion = if remote.symmetric_nat { 8u32.div_ceil(remote.public_ips.len() as u32) // 100 ports every 10 ms, or 1000 ports pinged a second
-        } else { 0 };
+        } else { 1 };
 
         let mut port_counter = 0;
         
@@ -352,10 +358,10 @@ unsafe fn hole_punch(host: *mut ENetHost, local: &PeerAddressSet, remote: &PeerA
                     //println!("[SYM] CHECK {remote_ip:?} PORTS {} to {}", remote.port.wrapping_add(base_port as u16), remote.port.wrapping_add(base_port as u16).wrapping_add(port_expansion as u16 - 1));
                 }
                 else {
-                    //println!("[CONE] CHECK {remote_ip:?} PORT {}", remote.port);
+                    println!("[CONE] CHECK {remote_ip:?} PORT {}", remote.port);
                 }
 
-                for port_exp in 0..port_expansion {
+                for port_exp in 1..=port_expansion {
                     let port = remote.port.wrapping_add(base_port as u16).wrapping_add(port_exp as u16);
                     let remote_address = ENetAddress { host: u32::to_be(remote_ip.to_bits()), port: remote.port };            
                     let send_res = enet_socket_send((*host).socket, &remote_address, &ENetBuffer { data: data.as_mut_ptr().cast(), dataLength: data.len() }, 1);
@@ -368,7 +374,7 @@ unsafe fn hole_punch(host: *mut ENetHost, local: &PeerAddressSet, remote: &PeerA
 
             let mut received = [0; 64];
             let mut input = _ENetSocketWait_ENET_SOCKET_WAIT_RECEIVE as u32;
-            enet_socket_wait((*host).socket, &mut input, 10);  // ms
+            enet_socket_wait((*host).socket, &mut input, 100);  // ms
 
             let mut sender_addr = std::mem::zeroed();
             let read_len = enet_socket_receive((*host).socket, &mut sender_addr, &mut ENetBuffer { data: received.as_mut_ptr().cast(), dataLength: received.len() }, 1);
@@ -382,6 +388,9 @@ unsafe fn hole_punch(host: *mut ENetHost, local: &PeerAddressSet, remote: &PeerA
                         return Ok(SocketAddrV4::new(ip_addr, sender_addr.port));
                     }
                 }
+            }
+            else if 0 < read_len {
+                println!("bad");
             }
 
             port_counter += 1;
