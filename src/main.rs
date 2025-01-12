@@ -341,14 +341,17 @@ unsafe fn hole_punch(host: *mut ENetHost, local: &PeerAddressSet, remote: &PeerA
         loop {
             for remote_ip in &remote.public_ips {
                 let port_incr = port_counter / 2;
-                let base_port = if port_incr % 2 == 0 {
+                let base_port = if !remote.symmetric_nat { 0 } else if port_incr % 2 == 0 {
                     (port_incr / 2) * port_expansion as i32
                 } else {
                     -(port_incr / 2 + 1) * port_expansion as i32
                 };
 
                 if remote.symmetric_nat {
-                    println!("CHECK PORTS {} to {}", remote.port.wrapping_add(base_port as u16), remote.port.wrapping_add(base_port as u16).wrapping_add(port_expansion as u16 - 1));
+                    println!("[SYM] CHECK {remote_ip:?} PORTS {} to {}", remote.port.wrapping_add(base_port as u16), remote.port.wrapping_add(base_port as u16).wrapping_add(port_expansion as u16 - 1));
+                }
+                else {
+                    println!("[CONE] CHECK {remote_ip:?} PORT {}", remote.port);
                 }
 
                 for port_exp in 0..port_expansion {
