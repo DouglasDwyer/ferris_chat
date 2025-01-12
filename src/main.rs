@@ -319,7 +319,7 @@ fn under_same_nat(local: &PeerAddressSet, remote: &PeerAddressSet) -> bool {
 
 /// Utilizes NAT punchthrough to establish a firewall hole between the `local` and `remote` peers.
 unsafe fn hole_punch(host: *mut ENetHost, local: &PeerAddressSet, remote: &PeerAddressSet) -> Result<SocketAddrV4, String> {
-    if under_same_nat(local, remote) {
+    if true || under_same_nat(local, remote) {
         return Ok(remote.local);
     }
     else {
