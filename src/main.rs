@@ -1,5 +1,5 @@
 #![allow(warnings)]
-
+#![feature(addr_parse_ascii)]
 use enet_sys::*;
 use local_ip_address::*;
 use serde::*;
@@ -54,7 +54,7 @@ pub struct PeerAddressSet {
 }
 
 impl PeerAddressSet {
-    const MAX_RETRIES: usize = 10;
+    const MAX_RETRIES: usize = 8;
 
 	const MAGIC_COOKIE: [u8; 4] = [0x21, 0x12, 0xA4, 0x42];
 
@@ -336,7 +336,7 @@ unsafe fn hole_punch(host: *mut ENetHost, local: &PeerAddressSet, remote: &PeerA
             println!("Attempting NAT punchthrough against cone NAT...");
         }
 
-        let port_expansion = if remote.symmetric_nat { 8u32.div_ceil(remote.public_ips.len() as u32) // 100 ports every 10 ms, or 1000 ports pinged a second
+        let port_expansion = if remote.symmetric_nat { 10u32.div_ceil(remote.public_ips.len() as u32) // 100 ports every 10 ms, or 1000 ports pinged a second
         } else { 1 };
 
         let mut port_counter = 0;
@@ -346,16 +346,16 @@ unsafe fn hole_punch(host: *mut ENetHost, local: &PeerAddressSet, remote: &PeerA
 
         loop {
             for remote_ip in &remote.public_ips {
-                /*let port_incr = port_counter / 2;
-                let base_port = if !remote.symmetric_nat { 0 } else if port_incr % 2 == 0 {
+                let port_incr = port_counter / 2;
+                let base_port = if !remote.symmetric_nat { 0 } else { port_incr * port_expansion }/* if port_incr % 2 == 0 {
                     (port_incr / 2) * port_expansion as i32
                 } else {
                     -(port_incr / 2 + 1) * port_expansion as i32
-                };*/
-                let base_port = port_counter * port_expansion as i32;
+                }; */;
+                //let base_port = port_counter * port_expansion as i32;
 
                 if remote.symmetric_nat {
-                    //println!("[SYM] CHECK {remote_ip:?} PORTS {} to {}", remote.port.wrapping_add(base_port as u16), remote.port.wrapping_add(base_port as u16).wrapping_add(port_expansion as u16 - 1));
+                    println!("[SYM] CHECK {remote_ip:?} PORTS {} to {}", remote.port.wrapping_add(base_port as u16), remote.port.wrapping_add(base_port as u16).wrapping_add(port_expansion as u16 - 1));
                 }
                 else {
                     println!("[CONE] CHECK {remote_ip:?} PORT {}", remote.port);
@@ -374,7 +374,7 @@ unsafe fn hole_punch(host: *mut ENetHost, local: &PeerAddressSet, remote: &PeerA
 
             let mut received = [0; 64];
             let mut input = _ENetSocketWait_ENET_SOCKET_WAIT_RECEIVE as u32;
-            enet_socket_wait((*host).socket, &mut input, 100);  // ms
+            enet_socket_wait((*host).socket, &mut input, 10);  // ms
 
             let mut sender_addr = std::mem::zeroed();
             let read_len = enet_socket_receive((*host).socket, &mut sender_addr, &mut ENetBuffer { data: received.as_mut_ptr().cast(), dataLength: received.len() }, 1);
@@ -392,6 +392,17 @@ unsafe fn hole_punch(host: *mut ENetHost, local: &PeerAddressSet, remote: &PeerA
             else if 0 < read_len {
                 println!("bad");
             }
+
+            /*
+            
+              Just have a list of candidates for communicating.
+              For each candidate, send the next packet. Then wait for receiver.
+              For anything targeted at cone NAT, just send a packet every now and again (this should cover the local case)
+              For symmetric NATs, spray packets in many directions
+              Periodically update the outgoing token? In the case that the network changes?
+              Larger question - how to deal with a network iface getting disconnected? Can we auto detect? Allow manual reset?
+            
+             */
 
             port_counter += 1;
         }
@@ -445,8 +456,16 @@ unsafe fn connect_run_chat(host: *mut ENetHost, remote: SocketAddrV4) {
 
 fn main() {
     unsafe {
+        //ENetAddress { host: u32::to_be(first.ip().to_bits()), port: first.port() }
+        let r_addr = if std::env::args().any(|x| x == "--wifi") {
+            Ipv4Addr::parse_ascii(b"10.110.57.238").unwrap()
+        }
+        else {
+            Ipv4Addr::parse_ascii(b"10.60.65.155").unwrap()
+        };
+
         enet_initialize();
-        let address = ENetAddress { host: ENET_HOST_ANY, port: ENET_PORT_ANY as u16 };
+        let address = ENetAddress { host: u32::to_be(r_addr.to_bits()), port: ENET_PORT_ANY as u16 };
         let server = enet_host_create(&address, 128, 2, 0, 0);
     
         if server.is_null() {
