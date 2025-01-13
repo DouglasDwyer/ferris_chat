@@ -343,10 +343,10 @@ unsafe fn hole_punch(host: *mut ENetHost, local: &PeerAddressSet, remote: &PeerA
         remote.port = remote.local.port(); */
 
         if remote.symmetric_nat {
-            //enet_socket_set_option((*host).socket, _ENetSocketOption_ENET_SOCKOPT_TTL, 4);
+            assert!(enet_socket_set_option((*host).socket, _ENetSocketOption_ENET_SOCKOPT_TTL, 6) == 0);
         }
         else {
-            //enet_socket_set_option((*host).socket, _ENetSocketOption_ENET_SOCKOPT_TTL, 64);
+            assert!(enet_socket_set_option((*host).socket, _ENetSocketOption_ENET_SOCKOPT_TTL, 64) == 0);
         }
 
         if remote.symmetric_nat {
@@ -406,10 +406,10 @@ unsafe fn hole_punch(host: *mut ENetHost, local: &PeerAddressSet, remote: &PeerA
                 println!("RECEIVED SOMETINTG");
                 if let Some(punchthrough_packet) = NatPunchthroughPacket::from_bytes(&received) {
                     if punchthrough_packet.id == remote.id {
+                        enet_socket_set_option((*host).socket, _ENetSocketOption_ENET_SOCKOPT_TTL, 64);
                         let ip_addr = Ipv4Addr::from_bits(u32::from_be(sender_addr.host));
                         let send_res = enet_socket_send((*host).socket, &sender_addr, &ENetBuffer { data: data.as_mut_ptr().cast(), dataLength: data.len() }, 1);
                         
-                        //enet_socket_set_option((*host).socket, _ENetSocketOption_ENET_SOCKOPT_TTL, 64);
                         return Ok(SocketAddrV4::new(ip_addr, sender_addr.port));
                     }
                 }
@@ -484,11 +484,11 @@ fn main() {
         let on_wifi = std::env::args().any(|x| x == "--wifi");
         //ENetAddress { host: u32::to_be(first.ip().to_bits()), port: first.port() }
         let r_addr = if on_wifi {
-            Ipv4Addr::parse_ascii(b"10.60.65.155").unwrap()
+            Ipv4Addr::parse_ascii(b"10.110.57.238").unwrap()
             //Ipv4Addr::parse_ascii(b"192.168.43.46").unwrap()
         }
         else {
-            Ipv4Addr::parse_ascii(b"192.168.43.46").unwrap()
+            Ipv4Addr::parse_ascii(b"192.168.42.29").unwrap()
         };
 
         enet_initialize();
@@ -502,11 +502,11 @@ fn main() {
         println!("Gathering host addresses...");
         let mut address_set = PeerAddressSet::host_address_set(server).expect("Failed to gather addresses.");
 
-        if on_wifi {
+        /*if on_wifi {
             use std::hash::*;
-            address_set.port -= RandomState::new().build_hasher().finish() as u16;
+            address_set.port -= ((RandomState::new().build_hasher().finish() as i16) / 1024) as u16;
             address_set.symmetric_nat = true;
-        }
+        }*/
 
         let address_data = serde_json::to_string(&address_set).expect("Failed to serialize address data");
         println!("Your address token: {address_data}");
